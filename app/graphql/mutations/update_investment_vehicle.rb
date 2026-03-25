@@ -12,7 +12,7 @@ module Mutations
       vehicle = InvestmentVehicle.find_by(id: id)
       raise_not_found("InvestmentVehicles.NotFound", id, "investment vehicle") if vehicle.nil?
 
-      attrs = extract_model_attributes(investment_vehicle)
+      attrs = extract_model_attributes(scoped_payload(investment_vehicle, :investment_vehicle, :investmentVehicle))
       assign_filtered_attributes(vehicle, attrs)
       vehicle.updated_by_id = current_user_id if vehicle.respond_to?(:updated_by_id=)
       vehicle.updated_at_utc = Time.now.utc if vehicle.respond_to?(:updated_at_utc=)

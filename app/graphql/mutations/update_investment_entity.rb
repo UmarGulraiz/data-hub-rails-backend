@@ -12,7 +12,7 @@ module Mutations
       entity = InvestmentEntity.find_by(id: id)
       raise_not_found("InvestmentEntities.NotFound", id, "investment entity") if entity.nil?
 
-      attrs = extract_model_attributes(investment_entity)
+      attrs = extract_model_attributes(scoped_payload(investment_entity, :investment_entity, :investmentEntity))
       assign_filtered_attributes(entity, attrs)
       entity.updated_by_id = current_user_id if entity.respond_to?(:updated_by_id=)
       entity.updated_at_utc = Time.now.utc if entity.respond_to?(:updated_at_utc=)

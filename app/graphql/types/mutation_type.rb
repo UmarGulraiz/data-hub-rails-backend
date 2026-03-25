@@ -16,6 +16,8 @@ module Types
     field :create_investment_entity, mutation: Mutations::CreateInvestmentEntity
     field :update_investment_entity, mutation: Mutations::UpdateInvestmentEntity
     field :delete_investment_entity, mutation: Mutations::DeleteInvestmentEntity
+    field :update_proof_ledger, mutation: Mutations::UpdateProofLedger
+    field :delete_proof_ledger, mutation: Mutations::DeleteProofLedger
     field :create_proof_ledger_comment, mutation: Mutations::CreateProofLedgerComment
   end
 end
