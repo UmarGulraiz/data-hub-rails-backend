@@ -82,6 +82,7 @@ module GraphqlApi
 
     def base_scope
       Investor.preload(
+        :investor_contacts,
         location: { country: :region },
         investment_vehicles: {
           investment_vehicle_investment_strategies: {
@@ -135,6 +136,7 @@ module GraphqlApi
         type: investor.type,
         updated_at_utc: investor.updated_at_utc,
         qualified: investor.qualified,
+        contacts_count: investor.investor_contacts.size,
         location: serialize_location(investor.location),
         investment_vehicles: investor.investment_vehicles.map do |vehicle|
           {
@@ -180,8 +182,12 @@ module GraphqlApi
 
     def serialize_investor_detail(investor)
       payload = serialize_record(investor)
+      location = investor.location || Location.find_by(id: investor.location_id)
       payload["currencyId"] = investor.investor_currencies.first&.currency_id
-      payload["location"] = deep_camelize(serialize_location(investor.location))
+      payload["location"] = deep_camelize(serialize_location(location))
+      payload["country"] = location&.country_id
+      payload["city"] = location&.city
+      payload["addressLine1"] = location&.address_line1
       payload["investmentVehicles"] = investor.investment_vehicles.map { |vehicle| serialize_record(vehicle) }
       payload["investmentStrategies"] = investor.investment_strategies.map { |strategy| serialize_record(strategy) }
       payload["contactsCount"] = investor.investor_contacts.count

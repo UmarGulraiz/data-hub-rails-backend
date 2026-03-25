@@ -151,8 +151,28 @@ module Types
     def investor_contacts(investor_id:)
       authorize_roles!(*GraphqlSupport::AuthHelpers::ALL_ROLES)
 
-      contacts = InvestorContact.where(investor_id: investor_id).order(created_at_utc: :desc, id: :asc)
-      { "data" => contacts.map { |contact| serialize_record(contact) } }
+      contacts = InvestorContact.includes(location: :country).where(investor_id: investor_id).order(created_at_utc: :desc, id: :asc)
+      {
+        "data" => contacts.map do |contact|
+          payload = serialize_record(contact)
+          location = contact.location
+          payload["location"] = if location.nil?
+                                  nil
+                                else
+                                  deep_camelize(
+                                    id: location.id,
+                                    country_id: location.country_id,
+                                    city: location.city,
+                                    address_line1: location.address_line1,
+                                    country: {
+                                      id: location.country&.id,
+                                      name: location.country&.name
+                                    }
+                                  )
+                                end
+          payload
+        end
+      }
     end
 
     def investment_entities(investor_id:)
