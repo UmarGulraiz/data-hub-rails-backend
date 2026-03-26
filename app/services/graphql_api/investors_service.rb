@@ -83,6 +83,10 @@ module GraphqlApi
     def base_scope
       Investor.preload(
         :investor_contacts,
+        investment_strategies: [
+          { investment_strategy_region_focuses: :region },
+          { investment_strategy_country_focuses: :country }
+        ],
         location: { country: :region },
         investment_vehicles: {
           investment_vehicle_investment_strategies: {
@@ -98,6 +102,10 @@ module GraphqlApi
     def base_export_scope
       Investor.preload(
         :investor_contacts,
+        investment_strategies: [
+          { investment_strategy_region_focuses: :region },
+          { investment_strategy_country_focuses: :country }
+        ],
         location: { country: :region },
         investment_vehicles: {
           investment_vehicle_investment_strategies: {
@@ -123,11 +131,7 @@ module GraphqlApi
     end
 
     def serialize_investor(investor)
-      strategies = investor.investment_vehicles
-                           .flat_map(&:investment_vehicle_investment_strategies)
-                           .map(&:investment_strategy)
-                           .compact
-                           .uniq(&:id)
+      strategies = strategy_records_for(investor)
 
       {
         id: investor.id,
@@ -215,11 +219,7 @@ module GraphqlApi
     end
 
     def csv_value_for(investor, column)
-      strategies = investor.investment_vehicles
-                           .flat_map(&:investment_vehicle_investment_strategies)
-                           .map(&:investment_strategy)
-                           .compact
-                           .uniq(&:id)
+      strategies = strategy_records_for(investor)
 
       case column
       when "name" then investor.name
@@ -253,6 +253,15 @@ module GraphqlApi
     def input_value(input, key)
       hash = input.respond_to?(:to_h) ? input.to_h : input
       hash[key] || hash[key.to_s]
+    end
+
+    def strategy_records_for(investor)
+      from_vehicles = investor.investment_vehicles
+                              .flat_map(&:investment_vehicle_investment_strategies)
+                              .map(&:investment_strategy)
+      from_investor = Array(investor.investment_strategies)
+
+      (from_vehicles + from_investor).compact.uniq(&:id)
     end
   end
 end

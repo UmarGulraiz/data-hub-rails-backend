@@ -37,14 +37,14 @@ module Mutations
     private
 
     def replace_region_focuses(strategy, region_ids)
-      strategy.investment_strategy_region_focuses.delete_all
+      InvestmentStrategyRegionFocus.where(investment_strategy_id: strategy.id).delete_all
       region_ids.map(&:presence).compact.each do |region_id|
         InvestmentStrategyRegionFocus.create!(investment_strategy_id: strategy.id, region_id: region_id)
       end
     end
 
     def replace_country_focuses(strategy, country_ids)
-      strategy.investment_strategy_country_focuses.delete_all
+      InvestmentStrategyCountryFocus.where(investment_strategy_id: strategy.id).delete_all
       country_ids.map(&:presence).compact.each do |country_id|
         InvestmentStrategyCountryFocus.create!(investment_strategy_id: strategy.id, country_id: country_id)
       end
