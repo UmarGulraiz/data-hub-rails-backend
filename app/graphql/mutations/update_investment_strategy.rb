@@ -12,7 +12,9 @@ module Mutations
       strategy = InvestmentStrategy.find_by(id: id)
       raise_not_found("InvestmentStrategies.NotFound", id, "investment strategy") if strategy.nil?
 
-      attrs = extract_model_attributes(investment_strategy)
+      attrs = extract_model_attributes(
+        scoped_payload(investment_strategy, :investment_strategy, :investmentStrategy)
+      )
       region_ids = attrs.delete("region_investment_focus")
       country_ids = attrs.delete("country_investment_focus")
 

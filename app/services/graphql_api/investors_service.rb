@@ -151,6 +151,7 @@ module GraphqlApi
 
       {
         id: location.id,
+        address_line1: location.address_line1,
         city: location.city,
         country: {
           id: location.country&.id,
@@ -179,25 +180,17 @@ module GraphqlApi
 
     def serialize_investor_detail(investor)
       payload = serialize_record(investor)
+      payload["currencyId"] = investor.investor_currencies.first&.currency_id
       payload["location"] = deep_camelize(serialize_location(investor.location))
       payload["investmentVehicles"] = investor.investment_vehicles.map { |vehicle| serialize_record(vehicle) }
       payload["investmentStrategies"] = investor.investment_strategies.map { |strategy| serialize_record(strategy) }
       payload["contactsCount"] = investor.investor_contacts.count
-      payload["investmentEntitiesCount"] = ActiveRecord::Base.connection.select_value(
-        ActiveRecord::Base.send(
-          :sanitize_sql_array,
-          [
-            <<~SQL.squish,
-              SELECT COUNT(public.investment_entities.id)
-              FROM public.investment_entities
-              INNER JOIN public.investment_vehicles
-                ON public.investment_entities.investment_vehicle_id = public.investment_vehicles.id::text
-              WHERE public.investment_vehicles.investor_id = ?
-            SQL
-            investor.id
-          ]
-        )
-      ).to_i
+      vehicle_ids = investor.investment_vehicles.map { |vehicle| vehicle.id.to_s }
+      payload["investmentEntitiesCount"] = if vehicle_ids.empty?
+                                             0
+                                           else
+                                             InvestmentEntity.where(investment_vehicle_id: vehicle_ids).count
+                                           end
       payload
     end
 

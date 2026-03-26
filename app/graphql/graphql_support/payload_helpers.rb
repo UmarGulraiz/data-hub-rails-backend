@@ -44,6 +44,13 @@ module GraphqlSupport
     end
 
     def normalize_attribute_value(record, column_name, value)
+      value = normalize_blank_value(record, column_name, value)
+      value = normalize_array_value(record, column_name, value)
+      value = normalize_enum_value(record, column_name, value)
+      value
+    end
+
+    def normalize_blank_value(record, column_name, value)
       return value unless value.is_a?(String) && value.strip.empty?
 
       column = record.class.columns_hash[column_name]
@@ -55,6 +62,39 @@ module GraphqlSupport
       else
         nil
       end
+    end
+
+    def normalize_enum_value(record, column_name, value)
+      enum_mapping = record.class.defined_enums[column_name]
+      return value if enum_mapping.blank? || value.nil?
+
+      candidate = value.to_s
+      return candidate if enum_mapping.key?(candidate) || enum_mapping.value?(candidate)
+
+      normalized = candidate
+                   .tr("-", "_")
+                   .gsub(/\s+/, "_")
+                   .underscore
+                   .gsub(/[^a-z0-9_]/, "_")
+                   .gsub(/_+/, "_")
+                   .sub(/^_/, "")
+                   .sub(/_$/, "")
+
+      return normalized if enum_mapping.key?(normalized) || enum_mapping.value?(normalized)
+
+      value
+    end
+
+    def normalize_array_value(record, column_name, value)
+      column = record.class.columns_hash[column_name]
+      return value if column.nil?
+      return value unless column.respond_to?(:array) && column.array
+      return value unless value.is_a?(String)
+
+      value
+        .split(",")
+        .map { |item| item.strip }
+        .reject(&:blank?)
     end
   end
 end

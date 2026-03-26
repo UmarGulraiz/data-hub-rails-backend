@@ -1,3 +1,5 @@
+require "securerandom"
+
 module Mutations
   class CreateProofLedgerComment < Mutations::BaseMutation
     argument :filter, Types::RelationFilterInputType, required: true
@@ -26,6 +28,7 @@ module Mutations
 
       record = ProofLedgerComment.new(
         relation.merge(
+          id: SecureRandom.uuid,
           proof_ledger_comment_reply_to_id: reply_to_id,
           field_id: field_id.to_s,
           comment: comment.to_s.strip,

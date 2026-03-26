@@ -41,6 +41,7 @@ module Types
       argument :investor_id, ID, required: true
     end
     field :regions, GraphQL::Types::JSON, null: false
+    field :currencies, GraphQL::Types::JSON, null: false
     field :countries, GraphQL::Types::JSON, null: false do
       argument :region_ids, [ID], required: false
     end
@@ -157,10 +158,12 @@ module Types
     def investment_entities(investor_id:)
       authorize_roles!(*GraphqlSupport::AuthHelpers::ALL_ROLES)
 
-      entities = InvestmentEntity
-                 .joins("INNER JOIN public.investment_vehicles ON public.investment_entities.investment_vehicle_id = public.investment_vehicles.id::text")
-                 .where("\"public\".\"investment_vehicles\".\"investor_id\" = ?", investor_id)
-                 .order(created_at_utc: :desc, id: :asc)
+      vehicle_ids = InvestmentVehicle.where(investor_id: investor_id).pluck(:id).map(&:to_s)
+      entities = if vehicle_ids.empty?
+                   InvestmentEntity.none
+                 else
+                   InvestmentEntity.where(investment_vehicle_id: vehicle_ids).order(created_at_utc: :desc, id: :asc)
+                 end
       { "data" => entities.map { |entity| serialize_record(entity) } }
     end
 
@@ -178,6 +181,25 @@ module Types
             updated_at_utc: region.updated_at_utc
           }
         end.map { |payload| deep_camelize(payload) }
+      }
+    end
+
+    def currencies
+      authorize_roles!(*GraphqlSupport::AuthHelpers::ALL_ROLES)
+
+      {
+        "data" => Currency.order(:code, :name).map do |currency|
+          deep_camelize(
+            id: currency.id,
+            name: currency.name,
+            symbol: currency.symbol,
+            code: currency.code,
+            decimal_places: currency.decimal_places,
+            is_active: currency.is_active,
+            created_at_utc: currency.created_at_utc,
+            updated_at_utc: currency.updated_at_utc
+          )
+        end
       }
     end
 

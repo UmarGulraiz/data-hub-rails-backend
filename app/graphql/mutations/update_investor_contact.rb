@@ -12,7 +12,7 @@ module Mutations
       contact = InvestorContact.find_by(id: id)
       raise_not_found("InvestorContacts.NotFound", id, "investor contact") if contact.nil?
 
-      attrs = extract_model_attributes(investor_contact)
+      attrs = extract_model_attributes(scoped_payload(investor_contact, :investor_contact, :investorContact))
       assign_filtered_attributes(contact, attrs)
       contact.updated_by_id = current_user_id if contact.respond_to?(:updated_by_id=)
       contact.updated_at_utc = Time.now.utc if contact.respond_to?(:updated_at_utc=)
