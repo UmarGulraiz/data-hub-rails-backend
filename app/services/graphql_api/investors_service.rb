@@ -7,9 +7,11 @@ module GraphqlApi
       per_page = limit.to_i.positive? ? limit.to_i : 10
       per_page = [per_page, 100].min
 
-      investors = filtered_scope(base_scope, filter: filter, column_filter: column_filter)
-      investors = investors.order(Arel.sql(order_sql(sort.to_a.first || {})))
-      total = investors.count
+      filtered = filtered_scope(base_scope, filter: filter, column_filter: column_filter)
+      filtered_ids = filtered.except(:order).reselect("public.investors.id").distinct
+
+      investors = base_scope.where(id: filtered_ids).order(Arel.sql(order_sql(sort)))
+      total = filtered_ids.count
       total_pages = (total.to_f / per_page).ceil
 
       {
@@ -24,8 +26,10 @@ module GraphqlApi
     end
 
     def export_by_filters(columns:, filter:, column_filter:, sort:)
-      investors = filtered_scope(base_export_scope, filter: filter, column_filter: column_filter)
-      build_csv(investors.order(Arel.sql(order_sql(sort.to_a.first || {}))), columns)
+      filtered = filtered_scope(base_export_scope, filter: filter, column_filter: column_filter)
+      filtered_ids = filtered.except(:order).reselect("public.investors.id").distinct
+      investors = base_export_scope.where(id: filtered_ids).order(Arel.sql(order_sql(sort)))
+      build_csv(investors, columns)
     end
 
     def export_by_ids(selected_ids:, columns:)
@@ -185,12 +189,12 @@ module GraphqlApi
         apply_array_filter(scope, "public.investment_strategies.stage_focus", filter)
       when "regionInvestmentFocus"
         scope = strategy_filter_scope.joins(
-          "LEFT JOIN public.investment_strategy_region_focus ON public.investment_strategy_region_focus.investment_strategy_id = public.investment_strategies.id::text"
+          "LEFT JOIN public.investment_strategy_region_focus ON public.investment_strategy_region_focus.investment_strategy_id::text = public.investment_strategies.id::text"
         )
         apply_scalar_filter(scope, "public.investment_strategy_region_focus.region_id", filter)
       when "countryInvestmentFocus"
         scope = strategy_filter_scope.joins(
-          "LEFT JOIN public.investment_strategy_country_focus ON public.investment_strategy_country_focus.investment_strategy_id = public.investment_strategies.id::text"
+          "LEFT JOIN public.investment_strategy_country_focus ON public.investment_strategy_country_focus.investment_strategy_id::text = public.investment_strategies.id::text"
         )
         apply_scalar_filter(scope, "public.investment_strategy_country_focus.country_id", filter)
       else
@@ -200,7 +204,7 @@ module GraphqlApi
 
     def strategy_filter_scope
       Investor.joins(
-        "LEFT JOIN public.investment_strategies ON public.investment_strategies.investor_id = public.investors.id::text"
+        "LEFT JOIN public.investment_strategies ON public.investment_strategies.investor_id::text = public.investors.id::text"
       )
     end
 
@@ -254,12 +258,35 @@ module GraphqlApi
 
     def apply_array_filter(scope, column, filter)
       values = filter[:values]
+      normalized_values = normalize_filter_tokens(values)
 
       case filter[:operator]
       when "eq", "inArray"
-        scope.where("#{column} && ARRAY[?]::varchar[]", values)
+        return scope.none if normalized_values.empty?
+
+        scope.where(
+          <<~SQL,
+            EXISTS (
+              SELECT 1
+              FROM unnest(COALESCE(#{column}::text[], ARRAY[]::text[])) AS elem
+              WHERE regexp_replace(lower(elem), '[^a-z0-9]', '', 'g') IN (?)
+            )
+          SQL
+          normalized_values
+        )
       when "ne", "notInArray"
-        scope.where("NOT (COALESCE(#{column}, ARRAY[]::varchar[]) && ARRAY[?]::varchar[])", values)
+        return scope if normalized_values.empty?
+
+        scope.where(
+          <<~SQL,
+            NOT EXISTS (
+              SELECT 1
+              FROM unnest(COALESCE(#{column}::text[], ARRAY[]::text[])) AS elem
+              WHERE regexp_replace(lower(elem), '[^a-z0-9]', '', 'g') IN (?)
+            )
+          SQL
+          normalized_values
+        )
       when "isEmpty"
         scope.where("#{column} IS NULL OR cardinality(#{column}) = 0")
       when "isNotEmpty"
@@ -293,6 +320,13 @@ module GraphqlApi
         .flat_map { |value| value.is_a?(Array) ? value : [value] }
         .map { |value| value.is_a?(String) ? value.strip : value }
         .reject { |value| value.nil? || value == "" }
+    end
+
+    def normalize_filter_tokens(values)
+      Array(values)
+        .map { |value| value.to_s.strip.downcase.gsub(/[^a-z0-9]/, "") }
+        .reject(&:blank?)
+        .uniq
     end
 
     def normalize_boolean(value)
@@ -359,16 +393,112 @@ module GraphqlApi
       )
     end
 
-    def order_sql(sort_item)
+    def order_sql(sort_items)
+      items = Array(sort_items).map { |item| item.respond_to?(:to_h) ? item.to_h : item }.compact
+      items = [{ "field" => "name", "direction" => "asc" }] if items.empty?
+
+      clauses = items.map { |item| order_clause_for(item) }.compact
+      clauses = ["public.investors.name ASC NULLS LAST"] if clauses.empty?
+      clauses << "public.investors.id ASC"
+      clauses.uniq.join(", ")
+    end
+
+    def order_clause_for(sort_item)
       sort_field = input_value(sort_item, :field).to_s
       sort_direction = input_value(sort_item, :direction).to_s.downcase == "desc" ? "DESC" : "ASC"
 
-      case sort_field
-      when "updatedAtUtc"
-        "public.investors.updated_at_utc #{sort_direction} NULLS LAST"
-      else
-        "public.investors.name #{sort_direction}, public.investors.id ASC"
-      end
+      expression =
+        case sort_field
+        when "name" then "public.investors.name"
+        when "websiteUrl" then "public.investors.website_url"
+        when "investorType" then "public.investors.type"
+        when "updatedAtUtc" then "public.investors.updated_at_utc"
+        when "qualified" then "public.investors.qualified"
+        when "headquarterCity"
+          "(SELECT l.city FROM public.locations l WHERE l.id::text = public.investors.location_id::text LIMIT 1)"
+        when "headquarterCountry"
+          <<~SQL.squish
+            (SELECT c.name
+             FROM public.locations l
+             LEFT JOIN public.countries c ON c.id::text = l.country_id::text
+             WHERE l.id::text = public.investors.location_id::text
+             LIMIT 1)
+          SQL
+        when "headquarterRegion"
+          <<~SQL.squish
+            (SELECT r.name
+             FROM public.locations l
+             LEFT JOIN public.countries c ON c.id::text = l.country_id::text
+             LEFT JOIN public.regions r ON r.id::text = c.region_id::text
+             WHERE l.id::text = public.investors.location_id::text
+             LIMIT 1)
+          SQL
+        when "numberOfContacts"
+          "(SELECT COUNT(*) FROM public.investor_contacts ic WHERE ic.investor_id::text = public.investors.id::text)"
+        when "investmentVehiclesCount"
+          "(SELECT COUNT(*) FROM public.investment_vehicles iv WHERE iv.investor_id::text = public.investors.id::text)"
+        when "investmentVehicleNames"
+          <<~SQL.squish
+            (SELECT string_agg(DISTINCT iv.name, ', ' ORDER BY iv.name)
+             FROM public.investment_vehicles iv
+             WHERE iv.investor_id::text = public.investors.id::text)
+          SQL
+        when "assetClassFocus"
+          <<~SQL.squish
+            (SELECT string_agg(DISTINCT focus.value, ', ' ORDER BY focus.value)
+             FROM public.investment_strategies s
+             LEFT JOIN LATERAL unnest(COALESCE(s.asset_class_focus::text[], ARRAY[]::text[])) AS focus(value) ON TRUE
+             WHERE s.investor_id::text = public.investors.id::text)
+          SQL
+        when "sectorInvestmentFocus"
+          <<~SQL.squish
+            (SELECT string_agg(DISTINCT focus.value, ', ' ORDER BY focus.value)
+             FROM public.investment_strategies s
+             LEFT JOIN LATERAL unnest(COALESCE(s.sector_investment_focus::text[], ARRAY[]::text[])) AS focus(value) ON TRUE
+             WHERE s.investor_id::text = public.investors.id::text)
+          SQL
+        when "maturityFocus"
+          <<~SQL.squish
+            (SELECT string_agg(DISTINCT focus.value, ', ' ORDER BY focus.value)
+             FROM public.investment_strategies s
+             LEFT JOIN LATERAL unnest(COALESCE(s.maturity_focus::text[], ARRAY[]::text[])) AS focus(value) ON TRUE
+             WHERE s.investor_id::text = public.investors.id::text)
+          SQL
+        when "investorTypeFocus"
+          <<~SQL.squish
+            (SELECT string_agg(DISTINCT focus.value, ', ' ORDER BY focus.value)
+             FROM public.investment_strategies s
+             LEFT JOIN LATERAL unnest(COALESCE(s.investor_type_focus::text[], ARRAY[]::text[])) AS focus(value) ON TRUE
+             WHERE s.investor_id::text = public.investors.id::text)
+          SQL
+        when "stageFocus"
+          <<~SQL.squish
+            (SELECT string_agg(DISTINCT focus.value, ', ' ORDER BY focus.value)
+             FROM public.investment_strategies s
+             LEFT JOIN LATERAL unnest(COALESCE(s.stage_focus::text[], ARRAY[]::text[])) AS focus(value) ON TRUE
+             WHERE s.investor_id::text = public.investors.id::text)
+          SQL
+        when "regionInvestmentFocus"
+          <<~SQL.squish
+            (SELECT string_agg(DISTINCT r.name, ', ' ORDER BY r.name)
+             FROM public.investment_strategies s
+             LEFT JOIN public.investment_strategy_region_focus rf ON rf.investment_strategy_id::text = s.id::text
+             LEFT JOIN public.regions r ON r.id::text = rf.region_id::text
+             WHERE s.investor_id::text = public.investors.id::text)
+          SQL
+        when "countryInvestmentFocus"
+          <<~SQL.squish
+            (SELECT string_agg(DISTINCT c.name, ', ' ORDER BY c.name)
+             FROM public.investment_strategies s
+             LEFT JOIN public.investment_strategy_country_focus cf ON cf.investment_strategy_id::text = s.id::text
+             LEFT JOIN public.countries c ON c.id::text = cf.country_id::text
+             WHERE s.investor_id::text = public.investors.id::text)
+          SQL
+        end
+
+      return nil if expression.blank?
+
+      "#{expression} #{sort_direction} NULLS LAST"
     end
 
     def serialize_investor(investor)
