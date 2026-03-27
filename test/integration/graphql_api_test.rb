@@ -204,22 +204,48 @@ class GraphqlApiTest < ActionDispatch::IntegrationTest
     assert_equal "Ada", user_response.dig("data", "user", "userDetails", "firstName")
 
     investor_search_query = <<~GRAPHQL
-      query {
-        investorSearch(page: 1, limit: 10)
+      query($filter: JSON, $columnFilter: JSON) {
+        investorSearch(page: 1, limit: 10, filter: $filter, columnFilter: $columnFilter)
       }
     GRAPHQL
-    investor_search = graphql(investor_search_query)
+    investor_search = graphql(
+      investor_search_query,
+      variables: {
+        filter: {
+          joinOperator: "and",
+          filterList: {
+            investorType: [
+              { operator: "inArray", value: ["family_office"] }
+            ],
+            qualified: [
+              { operator: "inArray", value: ["NotQualified"] }
+            ]
+          }
+        }
+      }
+    )
     assert_equal @investor.id, investor_search.dig("data", "investorSearch", "data", 0, "id")
 
     export_by_filters_query = <<~GRAPHQL
-      query($columns: [String!]) {
-        exportInvestorsByFilters(columns: $columns)
+      query($columns: [String!], $filter: JSON, $columnFilter: JSON) {
+        exportInvestorsByFilters(columns: $columns, filter: $filter, columnFilter: $columnFilter)
       }
     GRAPHQL
     export_by_filters = graphql(
       export_by_filters_query,
       variables: {
-        columns: ["name", "websiteUrl"]
+        columns: ["name", "websiteUrl"],
+        filter: {
+          joinOperator: "and",
+          filterList: {
+            investorType: [
+              { operator: "inArray", value: ["family_office"] }
+            ]
+          }
+        },
+        columnFilter: {
+          organization: [@organization.id]
+        }
       }
     )
     assert_includes export_by_filters.dig("data", "exportInvestorsByFilters"), "Alpha Capital"

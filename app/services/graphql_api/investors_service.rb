@@ -2,31 +2,12 @@ module GraphqlApi
   class InvestorsService
     include GraphqlSupport::PayloadHelpers
 
-    def search(page:, limit:, column_filter:, sort:)
+    def search(page:, limit:, filter:, column_filter:, sort:)
       page_number = [page.to_i, 1].max
       per_page = limit.to_i.positive? ? limit.to_i : 10
       per_page = [per_page, 100].min
 
-      investors = base_scope
-      name_filter = input_value(column_filter, :name).to_s.strip
-
-      if name_filter.present?
-        term = "%#{name_filter.downcase}%"
-        investors = investors
-                    .left_outer_joins(:investment_vehicles)
-                    .left_outer_joins(investment_vehicles: :investment_vehicle_investment_strategies)
-                    .left_outer_joins(
-                      investment_vehicles: {
-                        investment_vehicle_investment_strategies: :investment_strategy
-                      }
-                    )
-                    .where(
-                      "LOWER(public.investors.name) LIKE :term OR LOWER(public.investment_vehicles.name) LIKE :term OR LOWER(public.investment_strategies.name) LIKE :term",
-                      term: term
-                    )
-                    .distinct
-      end
-
+      investors = filtered_scope(base_scope, filter: filter, column_filter: column_filter)
       investors = investors.order(Arel.sql(order_sql(sort.to_a.first || {})))
       total = investors.count
       total_pages = (total.to_f / per_page).ceil
@@ -42,27 +23,8 @@ module GraphqlApi
       }.then { |payload| deep_camelize(payload) }
     end
 
-    def export_by_filters(columns:, column_filter:, sort:)
-      investors = base_export_scope
-      name_filter = input_value(column_filter, :name).to_s.strip
-
-      if name_filter.present?
-        term = "%#{name_filter.downcase}%"
-        investors = investors
-                    .left_outer_joins(:investment_vehicles)
-                    .left_outer_joins(investment_vehicles: :investment_vehicle_investment_strategies)
-                    .left_outer_joins(
-                      investment_vehicles: {
-                        investment_vehicle_investment_strategies: :investment_strategy
-                      }
-                    )
-                    .where(
-                      "LOWER(public.investors.name) LIKE :term OR LOWER(public.investment_vehicles.name) LIKE :term OR LOWER(public.investment_strategies.name) LIKE :term",
-                      term: term
-                    )
-                    .distinct
-      end
-
+    def export_by_filters(columns:, filter:, column_filter:, sort:)
+      investors = filtered_scope(base_export_scope, filter: filter, column_filter: column_filter)
       build_csv(investors.order(Arel.sql(order_sql(sort.to_a.first || {}))), columns)
     end
 
@@ -79,6 +41,285 @@ module GraphqlApi
     end
 
     private
+
+    def filtered_scope(scope, filter:, column_filter:)
+      investors = apply_name_filter(scope, input_value(column_filter, :name).to_s.strip)
+      investors = apply_column_filters(investors, column_filter)
+      investors = apply_advanced_filters(investors, filter)
+      investors.distinct
+    end
+
+    def apply_name_filter(scope, name_filter)
+      return scope if name_filter.blank?
+
+      term = "%#{name_filter.downcase}%"
+      scope
+        .left_outer_joins(:investment_vehicles)
+        .left_outer_joins(investment_vehicles: :investment_vehicle_investment_strategies)
+        .left_outer_joins(
+          investment_vehicles: {
+            investment_vehicle_investment_strategies: :investment_strategy
+          }
+        )
+        .where(
+          "LOWER(public.investors.name) LIKE :term OR LOWER(public.investment_vehicles.name) LIKE :term OR LOWER(public.investment_strategies.name) LIKE :term",
+          term: term
+        )
+        .distinct
+    end
+
+    def apply_column_filters(scope, column_filter)
+      filters = normalize_column_filters(column_filter)
+      ids = matching_investor_ids(filters, "and")
+      return scope if ids.nil?
+
+      scope.where(id: ids)
+    end
+
+    def apply_advanced_filters(scope, filter)
+      join_operator = input_value(filter, :joinOperator).to_s.downcase == "or" ? "or" : "and"
+      filters = normalize_grouped_filters(input_value(filter, :filterList))
+      ids = matching_investor_ids(filters, join_operator)
+      return scope if ids.nil?
+
+      scope.where(id: ids)
+    end
+
+    def normalize_column_filters(column_filter)
+      hash = input_hash(column_filter)
+
+      hash.each_with_object([]) do |(key, raw_value), filters|
+        next if key.to_s == "name"
+
+        values = normalize_values(raw_value)
+        next if values.empty?
+
+        filters << {
+          id: key.to_s,
+          operator: values.length > 1 ? "inArray" : "eq",
+          value: values.length > 1 ? values : values.first
+        }
+      end
+    end
+
+    def normalize_grouped_filters(filter_list)
+      input_hash(filter_list).flat_map do |id, rules|
+        Array(rules).map do |rule|
+          rule_hash = input_hash(rule)
+          {
+            id: id.to_s,
+            operator: rule_hash["operator"].presence || "eq",
+            value: rule_hash["value"]
+          }
+        end
+      end
+    end
+
+    def matching_investor_ids(filters, join_operator)
+      normalized = filters.filter_map { |filter| normalize_filter_condition(filter) }
+      return nil if normalized.empty?
+
+      require "set"
+
+      id_sets = normalized.map { |filter| filter_scope(filter).distinct.pluck(:id).map(&:to_s).to_set }
+      return [] if id_sets.empty?
+
+      combined = id_sets.shift || Set.new
+      id_sets.each do |ids|
+        combined = join_operator == "or" ? (combined | ids) : (combined & ids)
+      end
+      combined.to_a
+    end
+
+    def normalize_filter_condition(filter)
+      filter_hash = input_hash(filter)
+      id = filter_hash["id"].to_s
+      operator = filter_hash["operator"].presence || "eq"
+      values = normalize_values(filter_hash["value"])
+
+      return nil if id.blank?
+      return nil if values.empty? && !%w[isEmpty isNotEmpty].include?(operator)
+
+      {
+        id: id,
+        operator: operator,
+        values: values
+      }
+    end
+
+    def filter_scope(filter)
+      case filter[:id]
+      when "investorType"
+        apply_scalar_filter(Investor.all, "public.investors.type", filter)
+      when "qualified"
+        apply_boolean_filter(Investor.all, "public.investors.qualified", filter)
+      when "organization"
+        apply_scalar_filter(Investor.all, "public.investors.organization_profile_id", filter)
+      when "iip"
+        scope = Investor.joins(
+          "INNER JOIN public.ideal_investor_profiles ON public.ideal_investor_profiles.organization_profile_id = public.investors.organization_profile_id"
+        )
+        apply_scalar_filter(scope, "public.ideal_investor_profiles.id", filter)
+      when "headquarterCity"
+        apply_text_filter(Investor.left_outer_joins(:location), "public.locations.city", filter)
+      when "headquarterCountry"
+        scope = Investor.left_outer_joins(location: :country)
+        apply_scalar_filter(scope, "public.countries.id", filter)
+      when "headquarterRegion"
+        scope = Investor.left_outer_joins(location: { country: :region })
+        apply_scalar_filter(scope, "public.regions.id", filter)
+      when "assetClassFocus"
+        scope = strategy_filter_scope
+        apply_array_filter(scope, "public.investment_strategies.asset_class_focus", filter)
+      when "sectorInvestmentFocus"
+        scope = strategy_filter_scope
+        apply_array_filter(scope, "public.investment_strategies.sector_investment_focus", filter)
+      when "maturityFocus"
+        scope = strategy_filter_scope
+        apply_array_filter(scope, "public.investment_strategies.maturity_focus", filter)
+      when "investorTypeFocus"
+        scope = strategy_filter_scope
+        apply_array_filter(scope, "public.investment_strategies.investor_type_focus", filter)
+      when "stageFocus"
+        scope = strategy_filter_scope
+        apply_array_filter(scope, "public.investment_strategies.stage_focus", filter)
+      when "regionInvestmentFocus"
+        scope = strategy_filter_scope.joins(
+          "LEFT JOIN public.investment_strategy_region_focus ON public.investment_strategy_region_focus.investment_strategy_id = public.investment_strategies.id::text"
+        )
+        apply_scalar_filter(scope, "public.investment_strategy_region_focus.region_id", filter)
+      when "countryInvestmentFocus"
+        scope = strategy_filter_scope.joins(
+          "LEFT JOIN public.investment_strategy_country_focus ON public.investment_strategy_country_focus.investment_strategy_id = public.investment_strategies.id::text"
+        )
+        apply_scalar_filter(scope, "public.investment_strategy_country_focus.country_id", filter)
+      else
+        Investor.none
+      end
+    end
+
+    def strategy_filter_scope
+      Investor.joins(
+        "LEFT JOIN public.investment_strategies ON public.investment_strategies.investor_id = public.investors.id::text"
+      )
+    end
+
+    def apply_text_filter(scope, column, filter)
+      values = filter[:values]
+
+      case filter[:operator]
+      when "eq"
+        scope.where("#{column} = ?", values.first)
+      when "ne"
+        scope.where("#{column} IS NULL OR #{column} <> ?", values.first)
+      when "iLike"
+        scope.where("LOWER(COALESCE(#{column}, '')) LIKE ?", "%#{values.first.downcase}%")
+      when "notILike"
+        scope.where("LOWER(COALESCE(#{column}, '')) NOT LIKE ?", "%#{values.first.downcase}%")
+      when "inArray"
+        scope.where("#{column} IN (?)", values)
+      when "notInArray"
+        scope.where("#{column} IS NULL OR #{column} NOT IN (?)", values)
+      when "isEmpty"
+        scope.where("#{column} IS NULL OR #{column} = ''")
+      when "isNotEmpty"
+        scope.where("#{column} IS NOT NULL AND #{column} <> ''")
+      else
+        scope
+      end
+    end
+
+    def apply_scalar_filter(scope, column, filter)
+      values = filter[:values]
+
+      case filter[:operator]
+      when "eq"
+        scope.where("#{column} = ?", values.first)
+      when "ne"
+        scope.where("#{column} IS NULL OR #{column} <> ?", values.first)
+      when "inArray"
+        scope.where("#{column} IN (?)", values)
+      when "notInArray"
+        scope.where("#{column} IS NULL OR #{column} NOT IN (?)", values)
+      when "isEmpty"
+        scope.where("#{column} IS NULL")
+      when "isNotEmpty"
+        scope.where("#{column} IS NOT NULL")
+      when "iLike", "notILike"
+        apply_text_filter(scope, column, filter)
+      else
+        scope
+      end
+    end
+
+    def apply_array_filter(scope, column, filter)
+      values = filter[:values]
+
+      case filter[:operator]
+      when "eq", "inArray"
+        scope.where("#{column} && ARRAY[?]::varchar[]", values)
+      when "ne", "notInArray"
+        scope.where("NOT (COALESCE(#{column}, ARRAY[]::varchar[]) && ARRAY[?]::varchar[])", values)
+      when "isEmpty"
+        scope.where("#{column} IS NULL OR cardinality(#{column}) = 0")
+      when "isNotEmpty"
+        scope.where("#{column} IS NOT NULL AND cardinality(#{column}) > 0")
+      else
+        scope
+      end
+    end
+
+    def apply_boolean_filter(scope, column, filter)
+      values = filter[:values].map { |value| normalize_boolean(value) }.compact.uniq
+
+      return scope.none if values.empty? && !%w[isEmpty isNotEmpty].include?(filter[:operator])
+
+      case filter[:operator]
+      when "eq", "inArray"
+        scope.where("#{column} IN (?)", values)
+      when "ne", "notInArray"
+        scope.where("#{column} IS NULL OR #{column} NOT IN (?)", values)
+      when "isEmpty"
+        scope.where("#{column} IS NULL")
+      when "isNotEmpty"
+        scope.where("#{column} IS NOT NULL")
+      else
+        scope
+      end
+    end
+
+    def normalize_values(raw_value)
+      Array(raw_value)
+        .flat_map { |value| value.is_a?(Array) ? value : [value] }
+        .map { |value| value.is_a?(String) ? value.strip : value }
+        .reject { |value| value.nil? || value == "" }
+    end
+
+    def normalize_boolean(value)
+      case value.to_s.strip.downcase
+      when "true", "qualified"
+        true
+      when "false", "notqualified", "not qualified"
+        false
+      else
+        nil
+      end
+    end
+
+    def input_hash(input)
+      hash =
+        if input.respond_to?(:to_unsafe_h)
+          input.to_unsafe_h
+        elsif input.respond_to?(:to_h)
+          input.to_h
+        else
+          input || {}
+        end
+
+      hash.each_with_object({}) do |(key, value), memo|
+        memo[key.to_s] = value
+      end
+    end
 
     def base_scope
       Investor.preload(
@@ -251,8 +492,8 @@ module GraphqlApi
     end
 
     def input_value(input, key)
-      hash = input.respond_to?(:to_h) ? input.to_h : input
-      hash[key] || hash[key.to_s]
+      hash = input_hash(input)
+      hash[key.to_s]
     end
 
     def strategy_records_for(investor)

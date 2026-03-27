@@ -13,12 +13,14 @@ module Types
     field :investor_search, GraphQL::Types::JSON, null: false do
       argument :page, Integer, required: false
       argument :limit, Integer, required: false
-      argument :column_filter, Types::ColumnFilterInputType, required: false
+      argument :filter, GraphQL::Types::JSON, required: false
+      argument :column_filter, GraphQL::Types::JSON, required: false
       argument :sort, [Types::SortInputType], required: false
     end
     field :export_investors_by_filters, String, null: false do
       argument :columns, [String], required: false
-      argument :column_filter, Types::ColumnFilterInputType, required: false
+      argument :filter, GraphQL::Types::JSON, required: false
+      argument :column_filter, GraphQL::Types::JSON, required: false
       argument :sort, [Types::SortInputType], required: false
     end
     field :export_investors_by_ids, String, null: false do
@@ -95,14 +97,25 @@ module Types
       )
     end
 
-    def investor_search(page: 1, limit: 10, column_filter: nil, sort: nil)
+    def investor_search(page: 1, limit: 10, filter: nil, column_filter: nil, sort: nil)
       authorize_roles!(*GraphqlSupport::AuthHelpers::ALL_ROLES)
-      investors_service.search(page: page, limit: limit, column_filter: column_filter || {}, sort: sort || [])
+      investors_service.search(
+        page: page,
+        limit: limit,
+        filter: filter || {},
+        column_filter: column_filter || {},
+        sort: sort || []
+      )
     end
 
-    def export_investors_by_filters(columns: nil, column_filter: nil, sort: nil)
+    def export_investors_by_filters(columns: nil, filter: nil, column_filter: nil, sort: nil)
       authorize_roles!(*GraphqlSupport::AuthHelpers::ALL_ROLES)
-      investors_service.export_by_filters(columns: columns, column_filter: column_filter || {}, sort: sort || [])
+      investors_service.export_by_filters(
+        columns: columns,
+        filter: filter || {},
+        column_filter: column_filter || {},
+        sort: sort || []
+      )
     end
 
     def export_investors_by_ids(selected_ids: nil, columns: nil)
